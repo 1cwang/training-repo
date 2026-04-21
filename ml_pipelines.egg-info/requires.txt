@@ -1,0 +1,7 @@
+sagemaker<3.0.0,>=2.200.0
+pytz
+
+[test]
+black
+flake8
+pydocstyle

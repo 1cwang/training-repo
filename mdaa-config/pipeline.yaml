@@ -1,0 +1,104 @@
+# MDAA SageMaker Pipeline Configuration — Training
+#
+# Defines a 3-step ML pipeline: preprocess → train → register model.
+# Deployed by the training buildspec via `mdaa deploy`.
+#
+# IMPORTANT: ECR image account IDs below (683313688378) are us-east-1 ONLY.
+# Different AWS regions use different account IDs for SageMaker built-in images.
+# For other regions, replace the account ID per:
+# https://docs.aws.amazon.com/sagemaker/latest/dg/sagemaker-algo-docker-registry-paths.html
+
+projectName: "{{env_var:SAGEMAKER_PROJECT_NAME}}"
+modelPackageGroupName: "{{env_var:MODEL_PACKAGE_GROUP_NAME}}"
+pipelineName: "{{env_var:SAGEMAKER_PIPELINE_NAME}}"
+
+pipeline:
+  # Network config — applied to all pipeline steps (processing, training).
+  # Runs SageMaker jobs inside your VPC with network isolation and encrypted inter-container traffic.
+  # The construct passes subnetIds/securityGroupIds as JSON-encoded env vars;
+  # the MDAA config parser auto-coerces JSON strings to arrays.
+  networkConfig:
+    enableNetworkIsolation: true
+    encryptInterContainerTraffic: true
+    subnetIds: "{{env_var:SUBNET_IDS}}"
+    securityGroupIds: "{{env_var:SECURITY_GROUP_IDS}}"
+
+  parameters:
+    - name: ProcessingInstanceCount
+      type: Integer
+      defaultValue: 1
+    - name: TrainingInstanceType
+      type: String
+      defaultValue: ml.m5.xlarge
+    - name: ModelApprovalStatus
+      type: String
+      # Set to "PendingManualApproval" (default) to require human review before deployment.
+      # Set to "Approved" to auto-trigger the deploy pipeline via EventBridge on every training run.
+      # WARNING: "Approved" will deploy every trained model without quality review.
+      defaultValue: PendingManualApproval
+    - name: InputDataUrl
+      type: String
+      # Default input data path — the training buildspec uploads data to this location.
+      # NOTE: <default_bucket> is a system placeholder resolved by Fn::Sub at CDK deploy time
+      # to the pipeline construct's S3 bucket. Do not replace it with an actual bucket name.
+      defaultValue: "s3://<default_bucket>/dataset/abalone-dataset.csv"
+
+  steps:
+    # Step 1: Preprocess raw data into train/validation/test splits
+    - name: PreprocessAbaloneData
+      type: Processing
+      processing:
+        imageUri: "683313688378.dkr.ecr.{{env_var:AWS_REGION}}.amazonaws.com/sagemaker-xgboost:1.7-1"
+        instanceType: ml.m5.xlarge
+        scriptS3Uri: "s3://<default_bucket>/{{env_var:SAGEMAKER_PIPELINE_NAME}}/scripts/preprocessing.py"
+        inputs:
+          - inputName: data
+            parameter: InputDataUrl
+        outputs:
+          - outputName: train
+          - outputName: validation
+          - outputName: test
+
+    # Step 2: Train XGBoost regression model
+    - name: TrainAbaloneModel
+      type: Training
+      training:
+        imageUri: "683313688378.dkr.ecr.{{env_var:AWS_REGION}}.amazonaws.com/sagemaker-xgboost:1.7-1"
+        instanceType: ml.m5.xlarge
+        outputPath: "s3://<default_bucket>/{{env_var:SAGEMAKER_PIPELINE_NAME}}/AbaloneTrain"
+        hyperparameters:
+          objective: "reg:squarederror"
+          num_round: "50"
+          max_depth: "5"
+          eta: "0.2"
+          gamma: "4"
+          min_child_weight: "6"
+          subsample: "0.7"
+          verbosity: "1"
+        inputChannels:
+          - channelName: train
+            stepOutput: PreprocessAbaloneData.train
+            contentType: text/csv
+          - channelName: validation
+            stepOutput: PreprocessAbaloneData.validation
+            contentType: text/csv
+
+    # Step 3: Register trained model in the Model Package Group
+    # The model is registered with the approval status from the pipeline parameter.
+    # When set to "Approved", EventBridge triggers the deploy pipeline automatically.
+    - name: RegisterAbaloneModel
+      type: RegisterModel
+      register:
+        imageUri: "683313688378.dkr.ecr.{{env_var:AWS_REGION}}.amazonaws.com/sagemaker-xgboost:1.7-1"
+        modelDataStep: TrainAbaloneModel
+        modelPackageGroupName: "{{env_var:MODEL_PACKAGE_GROUP_NAME}}"
+        contentTypes:
+          - text/csv
+        responseTypes:
+          - text/csv
+        inferenceInstanceTypes:
+          - ml.m5.large
+        transformInstanceTypes:
+          - ml.m5.large
+        approvalStatus:
+          parameter: ModelApprovalStatus

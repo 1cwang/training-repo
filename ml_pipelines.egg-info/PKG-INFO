@@ -1,0 +1,45 @@
+Metadata-Version: 2.4
+Name: ml_pipelines
+Version: 0.0.1
+Summary: ml pipelines - template package
+Author: Amazon Web Services
+License: Apache 2.0
+Classifier: Development Status :: 3 - Alpha
+Classifier: Intended Audience :: Developers
+Classifier: Natural Language :: English
+Classifier: Programming Language :: Python
+Classifier: Programming Language :: Python :: 3
+Classifier: Programming Language :: Python :: 3.11
+Classifier: Programming Language :: Python :: 3.12
+Classifier: Programming Language :: Python :: 3.13
+Requires-Python: >=3.12
+Description-Content-Type: text/markdown
+Requires-Dist: sagemaker<3.0.0,>=2.200.0
+Requires-Dist: pytz
+Provides-Extra: test
+Requires-Dist: black; extra == "test"
+Requires-Dist: flake8; extra == "test"
+Requires-Dist: pydocstyle; extra == "test"
+
+# SageMaker Build - Train Pipelines
+
+This folder contains all the SageMaker Pipelines of your project.
+
+`buildspec.yml` defines how to run a pipeline after each commit to this repository.
+`ml_pipelines/` contains the SageMaker pipelines definitions.
+The expected output of the main pipeline (from `training/pipeline.py`) is a model registered to SageMaker Model Registry.
+
+`source_scripts/` contains the underlying scripts run by the steps of your SageMaker Pipelines. For example, if your SageMaker Pipeline runs a Processing Job as part of a Processing Step, the code being run inside the Processing Job should be defined in this folder.
+Typically `source_scripts/` can contain individual scripts `preprocessing.py`, `training.py`, `postprocessing.py`, `evaluate.py`, depending on the nature of the steps run as part of the SageMaker Pipeline.
+We provide here an example with the Abalone dataset, to train an XGBoost model (using), and evaluating the model on a test set before sending it for manual approval to SageMaker Model Registry inside the SageMaker ModelPackageGroup defined when creating the SageMaker Project.
+Additionally, if you use custom containers, the Dockerfile definitions should be found in that folder.
+
+`notebooks/` contains experimentation notebooks.
+
+# Run pipeline from command line from this folder
+
+```
+pip install -e .
+
+run-pipeline --module-name ml_pipelines.training.pipeline --role-arn YOUR_SAGEMAKER_EXECUTION_ROLE_ARN --kwargs '{"region":"eu-west-1"}'
+```
