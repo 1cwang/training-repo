@@ -5,6 +5,7 @@ domains:
     environments:
       dev:
         account: default
+        use_bootstrap: false
         modules:
           pipeline:
             module_path: "@aws-mdaa/sagemaker-pipeline"
