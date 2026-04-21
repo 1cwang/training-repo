@@ -3,6 +3,52 @@ version: 0.2
 phases:
   install:
     commands:
+      # === Verdaccio workaround (MDAA packages not on public npm) ===
+      # Download pre-built packages from S3 model bucket and serve via local registry.
+      - |
+        set -e
+        echo "Setting up local npm registry for MDAA packages..."
+        MODEL_BUCKET="${ARTIFACT_BUCKET}"
+        mkdir -p /tmp/mdaa-packages
+        aws s3 cp "s3://${MODEL_BUCKET}/mdaa-packages/" /tmp/mdaa-packages/ --recursive --quiet
+        npm install -g verdaccio --registry https://registry.npmjs.org
+        # Configure verdaccio for anonymous publish
+        mkdir -p /root/.config/verdaccio
+        cat > /root/.config/verdaccio/config.yaml << 'VCONF'
+        storage: /tmp/verdaccio-storage
+        auth:
+          htpasswd:
+            file: ./htpasswd
+            max_users: 100
+        uplinks:
+          npmjs:
+            url: https://registry.npmjs.org/
+        packages:
+          '@aws-mdaa/*':
+            access: $all
+            publish: $all
+          '**':
+            access: $all
+            publish: $all
+            proxy: npmjs
+        log: { type: stdout, format: pretty, level: error }
+        VCONF
+        # Start verdaccio
+        nohup verdaccio --listen 4873 > /tmp/verdaccio.log 2>&1 &
+        sleep 3
+        # Register user and get token
+        TOKEN=$(curl -s -X PUT http://localhost:4873/-/user/org.couchdb.user:ci \
+          -H "Content-Type: application/json" \
+          -d '{"name":"ci","password":"ci12345"}' | python3 -c "import json,sys;print(json.load(sys.stdin).get('token',''))")
+        echo "//localhost:4873/:_authToken=\"${TOKEN}\"" >> /root/.npmrc
+        # Publish all packages
+        for tgz in /tmp/mdaa-packages/*.tgz; do
+          npm publish "$tgz" --registry http://localhost:4873 2>/dev/null || true
+        done
+        # Set local registry as default
+        npm config set registry http://localhost:4873
+        echo "Local registry ready with $(ls /tmp/mdaa-packages/*.tgz | wc -l) packages"
+      # Install MDAA CLI from local registry
       - npm install -g @aws-mdaa/cli
 
   build:
