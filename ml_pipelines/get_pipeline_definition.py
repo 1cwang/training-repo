@@ -4,9 +4,12 @@
 """A CLI to get pipeline definitions from pipeline modules."""
 
 import argparse
+import logging
 import sys
 
 from ml_pipelines._utils import get_pipeline_driver
+
+logger = logging.getLogger(__name__)
 
 
 def main() -> None:  # pragma: no cover
@@ -51,9 +54,9 @@ def main() -> None:  # pragma: no cover
             with open(args.file_name, "w") as f:
                 f.write(content)
         else:
-            print(content)
+            logger.info("Pipeline definition: %s", content)
     except Exception as e:  # pylint: disable=W0703
-        print(f"Exception: {e}")
+        logger.error("Exception: %s", e)
         sys.exit(1)
 
 

@@ -70,17 +70,16 @@ phases:
       # Deploy the SageMaker Pipeline via MDAA
       - cd mdaa-config && mdaa deploy && cd ..
 
-      # Read pipeline outputs from SSM (created by mdaa deploy)
+      # Read pipeline name from SSM (created by mdaa deploy above)
+      # PIPELINE_BUCKET_NAME and PIPELINE_KMS_ARN are set as CodeBuild env vars by the core stack.
       - |
         set -e
         PIPELINE_NAME=$(aws ssm get-parameter --name "/${MDAA_ORG}/mlops/pipeline/sm-pipeline/${SAGEMAKER_PROJECT_NAME}/pipeline-name" --query 'Parameter.Value' --output text)
-        PIPELINE_BUCKET=$(aws ssm get-parameter --name "/${MDAA_ORG}/mlops/pipeline/bucket/pipeline-${SAGEMAKER_PROJECT_NAME}/name" --query 'Parameter.Value' --output text)
-        PIPELINE_KMS=$(aws ssm get-parameter --name "/${MDAA_ORG}/mlops/pipeline/kms/sm-pipeline-${SAGEMAKER_PROJECT_NAME}/id" --query 'Parameter.Value' --output text)
-        echo "Pipeline: ${PIPELINE_NAME}, Bucket: ${PIPELINE_BUCKET}"
+        echo "Pipeline: ${PIPELINE_NAME}, Bucket: ${PIPELINE_BUCKET_NAME}"
 
-      # Upload ML scripts to the pipeline bucket (CodeBuild role has org-scoped KMS access)
-      - aws s3 cp source_scripts/preprocessing.py "s3://${PIPELINE_BUCKET}/${PIPELINE_NAME}/scripts/preprocessing.py" --sse aws:kms --sse-kms-key-id "${PIPELINE_KMS}"
-      - aws s3 cp source_scripts/evaluate.py "s3://${PIPELINE_BUCKET}/${PIPELINE_NAME}/scripts/evaluate.py" --sse aws:kms --sse-kms-key-id "${PIPELINE_KMS}"
+      # Upload ML scripts to the pipeline bucket (bucket default encryption handles KMS)
+      - aws s3 cp source_scripts/preprocessing.py "s3://${PIPELINE_BUCKET_NAME}/${PIPELINE_NAME}/scripts/preprocessing.py"
+      - aws s3 cp source_scripts/evaluate.py "s3://${PIPELINE_BUCKET_NAME}/${PIPELINE_NAME}/scripts/evaluate.py"
 
       # Start pipeline execution
       - |

@@ -16,11 +16,10 @@ import json
 import logging
 import os
 from functools import lru_cache
-from typing import Any, Optional
+from typing import Optional
 
 import boto3
 import sagemaker
-import sagemaker.session
 from sagemaker.estimator import Estimator
 from sagemaker.inputs import TrainingInput
 from sagemaker.model_metrics import MetricsSource, ModelMetrics
@@ -31,87 +30,116 @@ from sagemaker.workflow.conditions import ConditionLessThanOrEqualTo
 from sagemaker.workflow.functions import JsonGet
 from sagemaker.workflow.parameters import ParameterInteger, ParameterString
 from sagemaker.workflow.pipeline import Pipeline
+from sagemaker.workflow.pipeline_context import PipelineSession
 from sagemaker.workflow.properties import PropertyFile
 from sagemaker.workflow.step_collections import RegisterModel
 from sagemaker.workflow.steps import ProcessingStep, TrainingStep
 
-# VPC and network isolation configuration (passed from L3 construct via CodeBuild env vars).
-# When ENABLE_NETWORK_ISOLATION=true, SageMaker containers have no network access —
-# all data must flow through SageMaker input/output channels, not direct API calls.
-# All pip dependencies must be pre-installed in the container image.
-ENABLE_NETWORK_ISOLATION = os.getenv("ENABLE_NETWORK_ISOLATION", "true").lower() == "true"
-ENCRYPT_INTER_CONTAINER_TRAFFIC = os.getenv("ENCRYPT_INTER_CONTAINER_TRAFFIC", "true").lower() == "true"
-SUBNET_IDS = json.loads(os.getenv("SUBNET_IDS", "[]"))
-SECURITY_GROUP_IDS = json.loads(os.getenv("SECURITY_GROUP_IDS", "[]"))
-
-
 logger = logging.getLogger(__name__)
+
+DEFAULT_INSTANCE_TYPE = "ml.m5.xlarge"
+CSV_CONTENT_TYPE = "text/csv"
 
 
 @lru_cache(maxsize=1)
-def get_session(region: str, default_bucket: Optional[str]) -> sagemaker.session.Session:
-    """Gets the sagemaker session based on the region.
+def get_pipeline_session(region: str, default_bucket: Optional[str]) -> PipelineSession:
+    """Creates a SageMaker PipelineSession for deferred pipeline execution.
 
     Args:
-        region: the aws region to start the session
-        default_bucket: the bucket to use for storing the artifacts
+        region: AWS region for the SageMaker session.
+        default_bucket: S3 bucket for storing pipeline artifacts.
 
     Returns:
-        `sagemaker.session.Session instance
+        A PipelineSession instance.
     """
-
     boto_session = boto3.Session(region_name=region)
-
     sagemaker_client = boto_session.client("sagemaker")
-    runtime_client = boto_session.client("sagemaker-runtime")
-    session = sagemaker.session.Session(
+
+    return PipelineSession(
         boto_session=boto_session,
         sagemaker_client=sagemaker_client,
-        sagemaker_runtime_client=runtime_client,
         default_bucket=default_bucket,
     )
 
-    return session
+
+def _resolve_image_uri(
+    sagemaker_session: PipelineSession,
+    image_name: str,
+    region: str,
+) -> str:
+    """Resolves a SageMaker image URI, falling back to the default XGBoost image."""
+    try:
+        return sagemaker_session.sagemaker_client.describe_image_version(
+            ImageName=image_name
+        )["ContainerImage"]
+    except sagemaker_session.sagemaker_client.exceptions.ResourceNotFound:
+        return sagemaker.image_uris.retrieve(
+            framework="xgboost",
+            region=region,
+            version="1.0-1",
+            py_version="py3",
+            instance_type=DEFAULT_INSTANCE_TYPE,
+        )
 
 
 def get_pipeline(
     region: str,
-    role: Optional[str] = None,
+    role: str,
     default_bucket: Optional[str] = None,
     bucket_kms_id: Optional[str] = None,
     model_package_group_name: str = "AbalonePackageGroup",
     pipeline_name: str = "AbalonePipeline",
     base_job_prefix: str = "Abalone",
     project_id: str = "SageMakerProjectId",
-) -> Any:
+    enable_network_isolation: Optional[bool] = None,
+    encrypt_inter_container_traffic: Optional[bool] = None,
+    subnet_ids: Optional[list[str]] = None,
+    security_group_ids: Optional[list[str]] = None,
+) -> Pipeline:
     """Gets a SageMaker ML Pipeline instance working with on abalone data.
 
     Args:
         region: AWS region to create and run the pipeline.
         role: IAM role to create and run steps and pipeline.
         default_bucket: the bucket to use for storing the artifacts
+        bucket_kms_id: Optional KMS key ID for encrypting pipeline outputs.
+        model_package_group_name: Name of the model package group.
+        pipeline_name: Name of the SageMaker pipeline.
+        base_job_prefix: Prefix for SageMaker job names.
+        project_id: SageMaker project ID for image name resolution.
+        enable_network_isolation: Whether to enable network isolation. Falls back to
+            ENABLE_NETWORK_ISOLATION env var (default true).
+        encrypt_inter_container_traffic: Whether to encrypt inter-container traffic. Falls back to
+            ENCRYPT_INTER_CONTAINER_TRAFFIC env var (default true).
+        subnet_ids: VPC subnet IDs. Falls back to SUBNET_IDS env var.
+        security_group_ids: VPC security group IDs. Falls back to SECURITY_GROUP_IDS env var.
 
     Returns:
         an instance of a pipeline
     """
+    if enable_network_isolation is None:
+        enable_network_isolation = os.getenv("ENABLE_NETWORK_ISOLATION", "true").lower() == "true"
+    if encrypt_inter_container_traffic is None:
+        encrypt_inter_container_traffic = os.getenv("ENCRYPT_INTER_CONTAINER_TRAFFIC", "true").lower() == "true"
+    if subnet_ids is None:
+        subnet_ids = json.loads(os.getenv("SUBNET_IDS", "[]"))
+    if security_group_ids is None:
+        security_group_ids = json.loads(os.getenv("SECURITY_GROUP_IDS", "[]"))
 
-    sagemaker_session = get_session(region, default_bucket)
-    if role is None:
-        role = sagemaker.session.get_execution_role(sagemaker_session)
+    sagemaker_session = get_pipeline_session(region, default_bucket)
 
-    # define network config
     network_config = NetworkConfig(
-        subnets=SUBNET_IDS if SUBNET_IDS else None,
-        security_group_ids=SECURITY_GROUP_IDS if SECURITY_GROUP_IDS else None,
-        enable_network_isolation=ENABLE_NETWORK_ISOLATION,
-        encrypt_inter_container_traffic=ENCRYPT_INTER_CONTAINER_TRAFFIC,
+        subnets=subnet_ids if subnet_ids else None,
+        security_group_ids=security_group_ids if security_group_ids else None,
+        enable_network_isolation=enable_network_isolation,
+        encrypt_inter_container_traffic=encrypt_inter_container_traffic,
     )
-    # define network config without network isolation to allow S3 access for preprocessor
+    # network config without network isolation to allow S3 access for preprocessor
     network_config_without_isolation = NetworkConfig(
-        subnets=SUBNET_IDS if SUBNET_IDS else None,
-        security_group_ids=SECURITY_GROUP_IDS if SECURITY_GROUP_IDS else None,
+        subnets=subnet_ids if subnet_ids else None,
+        security_group_ids=security_group_ids if security_group_ids else None,
         enable_network_isolation=False,
-        encrypt_inter_container_traffic=ENCRYPT_INTER_CONTAINER_TRAFFIC,
+        encrypt_inter_container_traffic=encrypt_inter_container_traffic,
     )
 
     # Default input data uses the pipeline's own artifact bucket.
@@ -122,27 +150,16 @@ def get_pipeline(
 
     # parameters for pipeline execution
     processing_instance_count = ParameterInteger(name="ProcessingInstanceCount", default_value=1)
-    processing_instance_type = ParameterString(name="ProcessingInstanceType", default_value="ml.m5.xlarge")
-    training_instance_type = ParameterString(name="TrainingInstanceType", default_value="ml.m5.xlarge")
+    processing_instance_type = ParameterString(name="ProcessingInstanceType", default_value=DEFAULT_INSTANCE_TYPE)
+    training_instance_type = ParameterString(name="TrainingInstanceType", default_value=DEFAULT_INSTANCE_TYPE)
     model_approval_status = ParameterString(name="ModelApprovalStatus", default_value="PendingManualApproval")
     input_data = ParameterString(name="InputDataUrl", default_value=default_input_data)
-    processing_image_name = "sagemaker-{0}-processingimagebuild".format(project_id)
-    training_image_name = "sagemaker-{0}-trainingimagebuild".format(project_id)
-    inference_image_name = "sagemaker-{0}-inferenceimagebuild".format(project_id)
+    processing_image_name = f"sagemaker-{project_id}-processingimagebuild"
+    training_image_name = f"sagemaker-{project_id}-trainingimagebuild"
+    inference_image_name = f"sagemaker-{project_id}-inferenceimagebuild"
 
     # processing step for feature engineering
-    try:
-        processing_image_uri = sagemaker_session.sagemaker_client.describe_image_version(
-            ImageName=processing_image_name
-        )["ContainerImage"]
-    except sagemaker_session.sagemaker_client.exceptions.ResourceNotFound:
-        processing_image_uri = sagemaker.image_uris.retrieve(
-            framework="xgboost",
-            region=region,
-            version="1.0-1",
-            py_version="py3",
-            instance_type="ml.m5.xlarge",
-        )
+    processing_image_uri = _resolve_image_uri(sagemaker_session, processing_image_name, region)
     script_processor = ScriptProcessor(
         image_uri=processing_image_uri,
         instance_type=processing_instance_type,
@@ -175,18 +192,7 @@ def get_pipeline(
     # training step for generating model artifacts
     model_path = f"s3://{default_bucket}/{base_job_prefix}/AbaloneTrain"
 
-    try:
-        training_image_uri = sagemaker_session.sagemaker_client.describe_image_version(ImageName=training_image_name)[
-            "ContainerImage"
-        ]
-    except sagemaker_session.sagemaker_client.exceptions.ResourceNotFound:
-        training_image_uri = sagemaker.image_uris.retrieve(
-            framework="xgboost",
-            region=region,
-            version="1.0-1",
-            py_version="py3",
-            instance_type="ml.m5.xlarge",
-        )
+    training_image_uri = _resolve_image_uri(sagemaker_session, training_image_name, region)
 
     xgb_train = Estimator(
         image_uri=training_image_uri,
@@ -197,10 +203,10 @@ def get_pipeline(
         sagemaker_session=sagemaker_session,
         role=role,
         output_kms_key=bucket_kms_id,
-        subnets=SUBNET_IDS if SUBNET_IDS else None,
-        security_group_ids=SECURITY_GROUP_IDS if SECURITY_GROUP_IDS else None,
-        enable_network_isolation=ENABLE_NETWORK_ISOLATION,
-        encrypt_inter_container_traffic=ENCRYPT_INTER_CONTAINER_TRAFFIC,
+        subnets=subnet_ids if subnet_ids else None,
+        security_group_ids=security_group_ids if security_group_ids else None,
+        enable_network_isolation=enable_network_isolation,
+        encrypt_inter_container_traffic=encrypt_inter_container_traffic,
     )
     xgb_train.set_hyperparameters(
         objective="reg:squarederror",
@@ -218,11 +224,11 @@ def get_pipeline(
         inputs={
             "train": TrainingInput(
                 s3_data=step_process.properties.ProcessingOutputConfig.Outputs["train"].S3Output.S3Uri,
-                content_type="text/csv",
+                content_type=CSV_CONTENT_TYPE,
             ),
             "validation": TrainingInput(
                 s3_data=step_process.properties.ProcessingOutputConfig.Outputs["validation"].S3Output.S3Uri,
-                content_type="text/csv",
+                content_type=CSV_CONTENT_TYPE,
             ),
         },
     )
@@ -267,32 +273,19 @@ def get_pipeline(
     # register model step that will be conditionally executed
     model_metrics = ModelMetrics(
         model_statistics=MetricsSource(
-            s3_uri="{}/evaluation.json".format(
-                step_eval.arguments["ProcessingOutputConfig"]["Outputs"][0]["S3Output"]["S3Uri"]
-            ),
+            s3_uri=f"{step_eval.arguments['ProcessingOutputConfig']['Outputs'][0]['S3Output']['S3Uri']}/evaluation.json",
             content_type="application/json",
         )
     )
 
-    try:
-        inference_image_uri = sagemaker_session.sagemaker_client.describe_image_version(ImageName=inference_image_name)[
-            "ContainerImage"
-        ]
-    except sagemaker_session.sagemaker_client.exceptions.ResourceNotFound:
-        inference_image_uri = sagemaker.image_uris.retrieve(
-            framework="xgboost",
-            region=region,
-            version="1.0-1",
-            py_version="py3",
-            instance_type="ml.m5.xlarge",
-        )
+    inference_image_uri = _resolve_image_uri(sagemaker_session, inference_image_name, region)
     step_register = RegisterModel(
         name="RegisterAbaloneModel",
         estimator=xgb_train,
         image_uri=inference_image_uri,
         model_data=step_train.properties.ModelArtifacts.S3ModelArtifacts,
-        content_types=["text/csv"],
-        response_types=["text/csv"],
+        content_types=[CSV_CONTENT_TYPE],
+        response_types=[CSV_CONTENT_TYPE],
         inference_instances=["ml.m5.large"],
         transform_instances=["ml.m5.large"],
         model_package_group_name=model_package_group_name,

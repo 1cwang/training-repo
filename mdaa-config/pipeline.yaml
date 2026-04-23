@@ -10,7 +10,13 @@
 
 projectName: "{{env_var:SAGEMAKER_PROJECT_NAME}}"
 modelPackageGroupName: "{{env_var:MODEL_PACKAGE_GROUP_NAME}}"
+# The Model Package Group is created by the sagemaker-mlops-app training construct, not here.
+# Setting false tells the pipeline construct to use this name as-is without applying the MDAA
+# naming prefix, since it is already a fully-qualified name (e.g. "myorg-dev-core-abalone-mpg").
+createModelPackageGroup: false
 pipelineName: "{{env_var:SAGEMAKER_PIPELINE_NAME}}"
+pipelineBucketName: "{{env_var:PIPELINE_BUCKET_NAME}}"
+pipelineKmsKeyArn: "{{env_var:PIPELINE_KMS_ARN}}"
 
 pipeline:
   # Network config — applied to all pipeline steps (processing, training).

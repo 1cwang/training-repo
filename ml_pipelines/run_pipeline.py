@@ -5,9 +5,12 @@
 
 import argparse
 import json
+import logging
 import sys
 
 from ml_pipelines._utils import convert_struct, get_pipeline_custom_tags, get_pipeline_driver
+
+logger = logging.getLogger(__name__)
 
 
 def main() -> None:  # pragma: no cover
@@ -61,27 +64,24 @@ def main() -> None:  # pragma: no cover
 
     try:
         pipeline = get_pipeline_driver(args.module_name, args.kwargs)
-        print("###### Creating/updating a SageMaker Pipeline with the following definition:")
         parsed = json.loads(pipeline.definition())
-        print(json.dumps(parsed, indent=2, sort_keys=True))
+        logger.info("Creating/updating a SageMaker Pipeline with the following definition:\n%s",
+                     json.dumps(parsed, indent=2, sort_keys=True))
 
         all_tags = get_pipeline_custom_tags(args.module_name, args.kwargs, tags)
 
         upsert_response = pipeline.upsert(role_arn=args.role_arn, description=args.description, tags=all_tags)
 
-        print("\n###### Created/Updated SageMaker Pipeline: Response received:")
-        print(upsert_response)
+        logger.info("Created/Updated SageMaker Pipeline. Response: %s", upsert_response)
 
         execution = pipeline.start()
-        print(f"\n###### Execution started with PipelineExecutionArn: {execution.arn}")
+        logger.info("Execution started with PipelineExecutionArn: %s", execution.arn)
 
-        print("Waiting for the execution to finish...")
+        logger.info("Waiting for the execution to finish...")
         execution.wait()
-        print("\n#####Execution completed. Execution step details:")
-
-        print(execution.list_steps())
+        logger.info("Execution completed. Execution step details: %s", execution.list_steps())
     except Exception as e:  # pylint: disable=W0703
-        print(f"Exception: {e}")
+        logger.error("Exception: %s", e)
         sys.exit(1)
 
 

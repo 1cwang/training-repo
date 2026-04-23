@@ -20,4 +20,3 @@ pip install -e .
 
 run-pipeline --module-name ml_pipelines.training.pipeline --role-arn YOUR_SAGEMAKER_EXECUTION_ROLE_ARN --kwargs '{"region":"eu-west-1"}'
 ```
-# Retrigger pipeline 20260422T005148
